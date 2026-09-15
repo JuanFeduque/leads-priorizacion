@@ -1,0 +1,12 @@
+pandas>=2.2
+numpy>=1.26
+python-dotenv>=1.0
+pydantic>=2.7
+rapidfuzz>=3.9
+phonenumbers>=8.13
+psycopg2-binary>=2.9
+sqlalchemy>=2.0
+supabase>=2.5
+anthropic>=0.34
+streamlit>=1.36
+pytest>=8.2
