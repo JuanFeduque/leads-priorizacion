@@ -134,7 +134,7 @@ CREATE INDEX idx_lead_sku_match      ON lead(sku_match)       WHERE sku_match IS
 
 -- ============================================================
 -- 6. lead_enriquecido
---    Resultado de la extracción con IA (Claude) sobre las
+--    Resultado de la extracción con IA  sobre las
 --    conversaciones asociadas al lead.  Relación 1:1 con lead.
 -- ============================================================
 CREATE TABLE lead_enriquecido (
