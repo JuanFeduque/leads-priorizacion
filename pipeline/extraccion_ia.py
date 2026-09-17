@@ -47,7 +47,58 @@ Eres un analista comercial experto en el sector de motocicletas. Recibirás un l
 Cada chat está claramente separado e identificado con un ID DE LEAD.
 Tu tarea es analizar CADA chat de forma independiente y extraer la información requerida.
 Debes responder estrictamente en formato JSON válido que cumpla con la estructura solicitada, devolviendo una lista bajo la clave "resultados".
+Conserva exactamente el mismo orden de los chats recibidos e incluye el lead_id de cada uno.
 """
+
+
+def _lead_id_vacio(valor) -> bool:
+    """Determina si DeepSeek omitió el identificador o devolvió texto vacío."""
+    return valor is None or (isinstance(valor, str) and not valor.strip())
+
+
+def completar_lead_ids_por_posicion(
+    resultados_lote: list,
+    lote_conversaciones: list,
+    *,
+    indice_inicial: int = 0,
+) -> list:
+    """Completa ``lead_id`` ausentes usando la posición del chat en el lote.
+
+    DeepSeek recibe los chats en orden y el prompt exige conservarlo. Por eso,
+    ``resultados_lote[i]`` corresponde a ``lote_conversaciones[i]``. El ID se
+    toma de la conversación original, nunca se genera ni se infiere del texto.
+    Resultados que excedan el tamaño del lote se conservan para que el flujo de
+    validación posterior reporte el desalineamiento en vez de asignar un ID
+    incorrecto.
+    """
+    corregidos = []
+    for indice_lote, resultado in enumerate(resultados_lote):
+        if not isinstance(resultado, dict):
+            print(f"    ⚠️ Resultado IA en índice {indice_inicial + indice_lote} no es un objeto; se conserva sin cambios.")
+            corregidos.append(resultado)
+            continue
+
+        resultado_corregido = resultado.copy()
+        if _lead_id_vacio(resultado_corregido.get("lead_id")):
+            if indice_lote >= len(lote_conversaciones):
+                print(
+                    f"    ⚠️ No se pudo completar lead_id en índice {indice_inicial + indice_lote}: "
+                    "no existe una conversación equivalente."
+                )
+            else:
+                lead_id_origen = lote_conversaciones[indice_lote].get("lead_id")
+                if _lead_id_vacio(lead_id_origen):
+                    print(
+                        f"    ⚠️ No se pudo completar lead_id en índice {indice_inicial + indice_lote}: "
+                        "la conversación fuente no tiene lead_id."
+                    )
+                else:
+                    resultado_corregido["lead_id"] = lead_id_origen
+                    print(
+                        f"    ℹ️ lead_id recuperado en índice {indice_inicial + indice_lote}: {lead_id_origen}."
+                    )
+        corregidos.append(resultado_corregido)
+    return corregidos
 
 def extraer_lote_conversaciones(lote_conversaciones: list) -> list:
     """Envía un bloque de conversaciones a DeepSeek."""
@@ -101,6 +152,7 @@ def procesar_todas_las_conversaciones(conversaciones_list: list, tamano_lote: in
     
     print(f"🤖 Iniciando análisis con DeepSeek (Batch Size: {tamano_lote}) para {total} chats...")
     resultados_globales = []
+    resultados_esperados = 0
 
     lotes = [chats_validos[i:i + tamano_lote] for i in range(0, total, tamano_lote)]
     total_lotes = len(lotes)
@@ -109,6 +161,10 @@ def procesar_todas_las_conversaciones(conversaciones_list: list, tamano_lote: in
         print(f"  📦 Procesando Lote {idx+1}/{total_lotes} ({len(lote)} leads)...", end=" ", flush=True)
 				
         resultados_lote = extraer_lote_conversaciones(lote)
+        resultados_lote = completar_lead_ids_por_posicion(
+            resultados_lote, lote, indice_inicial=resultados_esperados
+        )
+        resultados_esperados += len(lote)
         
         if resultados_lote:
             resultados_globales.extend(resultados_lote)
