@@ -8,5 +8,6 @@ psycopg2-binary>=2.9
 sqlalchemy>=2.0
 supabase>=2.5
 anthropic>=0.34
+openai>=1.0
 streamlit>=1.55
 pytest>=8.2

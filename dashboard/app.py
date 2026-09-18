@@ -3,8 +3,9 @@
 Ejecución local desde la raíz del proyecto:
     streamlit run dashboard/app.py
 
-Configure SUPABASE_URL y SUPABASE_ANON_KEY en .env (o en .streamlit/secrets.toml).
-La clave de servicio es exclusiva del ETL y no debe exponerse en este dashboard.
+Configure secretos en Streamlit. En un tablero público de una sola empresa use
+SUPABASE_SERVICE_ROLE_KEY junto con DASHBOARD_EMPRESA_ID; la clave permanece
+en el servidor de Streamlit y la consulta queda fijada a esa empresa.
 """
 
 from __future__ import annotations
@@ -38,29 +39,54 @@ def _secreto(nombre: str) -> str | None:
 
 
 @st.cache_data(ttl=300, show_spinner="Cargando leads desde Supabase...")
-def cargar_leads(url: str, api_key: str) -> list[dict[str, Any]]:
-    """Lee leads y su enriquecimiento IA mediante la relación de PostgREST."""
+def cargar_datos(url: str, api_key: str, empresa_id: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Lee ambas tablas explícitamente, sin depender del embedding de PostgREST."""
     cliente = create_client(url, api_key)
-    respuesta = (
+    consulta_leads = (
         cliente.table("lead")
         .select(
             "lead_id,nombre_cliente,telefono_normalizado,telefono_original,"
-            "modelo_interes_texto,empresa_id,estado_gestion,fecha_registro,fecha_primer_contacto,canal,"
-            "lead_enriquecido("
-            "intencion_compra,pidio_cita,objeciones,resumen_conversacion,"
-            "forma_pago_declarada,monto_cuota_inicial,urgencia)"
+            "modelo_interes_texto,empresa_id,estado_gestion,fecha_registro,fecha_primer_contacto,canal"
         )
+        .limit(2000)
+    )
+    if empresa_id:
+        consulta_leads = consulta_leads.eq("empresa_id", empresa_id)
+    leads = consulta_leads.execute()
+    ids_lead = [fila["lead_id"] for fila in (leads.data or [])]
+    if not ids_lead:
+        return [], []
+    enriquecidos = (
+        cliente.table("lead_enriquecido")
+        .select(
+            "lead_id,intencion_compra,pidio_cita,objeciones,resumen_conversacion,"
+            "forma_pago_declarada,monto_cuota_inicial,urgencia"
+        )
+        .in_("lead_id", ids_lead)
+        .limit(2000)
         .execute()
     )
-    return respuesta.data or []
+    return leads.data or [], enriquecidos.data or []
 
 
 def _texto_lista(valor: Any) -> str:
-    if not valor:
+    if valor is None or valor is pd.NA or valor is pd.NaT:
+        return "—"
+    if isinstance(valor, float) and pd.isna(valor):
         return "—"
     if isinstance(valor, (list, tuple, set)):
         return ", ".join(str(item) for item in valor) or "—"
     return str(valor)
+
+
+def _texto_o_defecto(valor: Any, defecto: str) -> str:
+    """Evita que NaN de Pandas reemplace un valor predeterminado visible."""
+    if valor is None or valor is pd.NA or valor is pd.NaT:
+        return defecto
+    if isinstance(valor, float) and pd.isna(valor):
+        return defecto
+    texto = str(valor).strip()
+    return texto if texto else defecto
 
 
 def _a_booleano(valor: Any) -> bool:
@@ -105,14 +131,30 @@ def _puntuar_lead(fila: pd.Series) -> tuple[int, str]:
     return score, temperatura
 
 
-def preparar_tabla(filas: list[dict[str, Any]]) -> pd.DataFrame:
-    """Aplana la relación 1:1 para visualizarla cómodamente con Pandas."""
+def preparar_tabla(filas: list[dict[str, Any]], enriquecidos: list[dict[str, Any]]) -> pd.DataFrame:
+    """Cruza ``lead.lead_id`` con ``lead_enriquecido.lead_id`` por UUID."""
+    leads_df = pd.DataFrame(filas)
+    if leads_df.empty:
+        return pd.DataFrame()
+
+    columnas_ia = [
+        "lead_id", "intencion_compra", "pidio_cita", "objeciones",
+        "resumen_conversacion", "forma_pago_declarada", "monto_cuota_inicial", "urgencia",
+    ]
+    ia_df = pd.DataFrame(enriquecidos, columns=columnas_ia)
+    # La restricción de BD es 1:1; esta defensa evita que una respuesta anómala
+    # multiplique filas visuales y mantiene el último enriquecimiento disponible.
+    ia_df = ia_df.drop_duplicates(subset=["lead_id"], keep="last")
+    combinados = leads_df.merge(
+        ia_df,
+        how="left",
+        left_on="lead_id",
+        right_on="lead_id",
+        validate="one_to_one",
+    )
+
     resultado: list[dict[str, Any]] = []
-    for lead in filas:
-        enriquecido = lead.get("lead_enriquecido") or {}
-        # Según la versión de PostgREST, la relación 1:1 puede llegar como lista.
-        if isinstance(enriquecido, list):
-            enriquecido = enriquecido[0] if enriquecido else {}
+    for _, lead in combinados.iterrows():
         resultado.append(
             {
                 "lead_id": lead.get("lead_id"),
@@ -121,12 +163,12 @@ def preparar_tabla(filas: list[dict[str, Any]]) -> pd.DataFrame:
                 "Nombre": lead.get("nombre_cliente") or "Sin nombre",
                 "Teléfono": lead.get("telefono_normalizado") or lead.get("telefono_original") or "—",
                 "Modelo de interés": lead.get("modelo_interes_texto") or "—",
-                "Intención": enriquecido.get("intencion_compra") or "Sin analizar",
-                "Pidió cita": _a_booleano(enriquecido.get("pidio_cita")),
-                "Forma de pago": enriquecido.get("forma_pago_declarada"),
-                "Monto cuota inicial": enriquecido.get("monto_cuota_inicial"),
-                "Objeciones": _texto_lista(enriquecido.get("objeciones")),
-                "Resumen IA": enriquecido.get("resumen_conversacion") or "Sin conversación analizada",
+                "Intención": _texto_o_defecto(lead.get("intencion_compra"), "Sin analizar"),
+                "Pidió cita": _a_booleano(lead.get("pidio_cita")),
+                "Forma de pago": lead.get("forma_pago_declarada"),
+                "Monto cuota inicial": lead.get("monto_cuota_inicial"),
+                "Objeciones": _texto_lista(lead.get("objeciones")),
+                "Resumen IA": _texto_o_defecto(lead.get("resumen_conversacion"), "Sin conversación analizada"),
                 "Fecha de registro": lead.get("fecha_registro"),
                 "Primer contacto": lead.get("fecha_primer_contacto"),
                 "Canal": lead.get("canal") or "—",
@@ -145,14 +187,19 @@ def main() -> None:
     st.caption("Seguimiento comercial con señales extraídas de las conversaciones por IA.")
 
     url = _secreto("SUPABASE_URL")
-    api_key = _secreto("SUPABASE_ANON_KEY")
+    empresa_fija = _secreto("DASHBOARD_EMPRESA_ID")
+    api_key = _secreto("SUPABASE_ACCESS_TOKEN") or _secreto("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not api_key:
-        st.error("Faltan SUPABASE_URL y SUPABASE_ANON_KEY en .env o Streamlit Secrets.")
+        st.error("Faltan SUPABASE_URL y credenciales de lectura en secrets.")
         st.info("Ejecuta: streamlit run dashboard/app.py")
+        st.stop()
+    if _secreto("SUPABASE_SERVICE_ROLE_KEY") and not empresa_fija and not _secreto("SUPABASE_ACCESS_TOKEN"):
+        st.error("DASHBOARD_EMPRESA_ID es obligatorio cuando el dashboard usa la clave de backend.")
         st.stop()
 
     try:
-        datos = preparar_tabla(cargar_leads(url, api_key))
+        leads, enriquecidos = cargar_datos(url, api_key, empresa_fija)
+        datos = preparar_tabla(leads, enriquecidos)
     except Exception as exc:
         st.error("No fue posible cargar los leads desde Supabase.")
         st.exception(exc)
@@ -166,10 +213,10 @@ def main() -> None:
         st.header("Filtros")
         empresas = sorted(datos["Empresa"].dropna().unique().tolist())
         estados = sorted(datos["Estado de gestión"].dropna().unique().tolist())
-        empresa = st.selectbox("Empresa / comercializadora", ["Todas", *empresas])
+        empresa = empresa_fija or st.selectbox("Empresa / comercializadora", ["Todas", *empresas])
         estado = st.selectbox("Estado de gestión", ["Todos", *estados])
         if st.button("Actualizar datos", use_container_width=True):
-            cargar_leads.clear()
+            st.cache_data.clear()
             st.rerun()
 
     filtrados = datos.copy()

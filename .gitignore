@@ -31,7 +31,8 @@ ENV/
 
 # Environment variables
 .env
-data/raw
+# Los insumos del assessment son sintéticos y se versionan para reproducir el ETL.
+# Nunca agregue aquí datos reales de clientes.
 # IDE
 .vscode/
 .idea/
