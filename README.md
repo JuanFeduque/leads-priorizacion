@@ -167,6 +167,6 @@ Las pruebas actuales verifican la deduplicación por teléfono y el cálculo de 
 
 ## 📦 Entregables y operación
 
-La entrega debe incluir el enlace a este repositorio y una URL pública funcional del dashboard. Para la sustentación se recomienda demostrar: ejecución del pipeline, modelo de datos y RLS en Supabase, lista priorizada, detalle IA de un lead y la lógica explicable del score.
+URL PROD: https://leads-priorizacion-8ul9dwh94q2deswjsulwho.streamlit.app
 
 La solución está diseñada para ejecutarse automáticamente mediante GitHub Actions a las 06:00 hora de Colombia (11:00 UTC), además de poder ejecutarse manualmente con `workflow_dispatch`.
