@@ -3,8 +3,6 @@ name: CI y ETL programado
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   schedule:
     # 06:00 America/Bogota = 11:00 UTC.
     - cron: '0 11 * * *'
@@ -55,4 +53,4 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          python -m pipeline.probar_pipeline
+          python -m pipeline.main

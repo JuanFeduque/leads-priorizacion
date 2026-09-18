@@ -1,5 +1,5 @@
 """
-pipeline/probar_pipeline.py
+pipeline/main.py
 ───────────────────────────
 Script de ejecución para validar y procesar el flujo completo del pipeline:
 Ingesta -> Normalización -> Supabase -> Enriquecimiento IA (DeepSeek) -> Persistencia en Supabase.
