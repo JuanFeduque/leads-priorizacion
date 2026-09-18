@@ -21,6 +21,7 @@ from supabase import Client, create_client
 
 TABLA_LEAD = "lead"
 TABLA_LEAD_ENRIQUECIDO = "lead_enriquecido"
+TABLA_LEAD_SCORE = "lead_score"
 _CAMPOS_REQUERIDOS = ("fecha_registro", "canal", "empresa_id", "nombre_cliente", "estado_gestion")
 
 
@@ -180,6 +181,19 @@ def cargar_leads_supabase(
     return ResultadoCarga(registros_preparados=len(registros), lotes_enviados=enviados, tamano_lote=tamano_lote)
 
 
+def cargar_registros_supabase(tabla: str, registros: list[dict[str, Any]], *, conflicto: str) -> int:
+    """Upsert reutilizable para tablas maestras y resultados calculados."""
+    if not registros:
+        return 0
+    cliente = crear_cliente_desde_entorno()
+    # ``DataFrame.to_dict`` conserva NaN; httpx lo rechaza porque JSON no
+    # permite NaN. Normalizamos cada campo, incluidas fechas y escalares NumPy.
+    registros_json = [{clave: _a_json(valor) for clave, valor in fila.items()} for fila in registros]
+    for lote in _lotes(registros_json, 250):
+        cliente.table(tabla).upsert(lote, on_conflict=conflicto, returning="minimal").execute()
+    return len(registros_json)
+
+
 def _lista_de_textos(valor: Any, campo: str, indice: int) -> list[str]:
     """Normaliza campos PostgreSQL ``TEXT[]`` provenientes de DeepSeek."""
     if _es_vacio(valor) or valor is pd.NA:
@@ -321,6 +335,19 @@ def guardar_leads_enriquecidos_en_supabase(resultados_ia: list[dict[str, Any]]) 
         if not registros:
             print("[Supabase] No hay leads enriquecidos válidos para sincronizar.")
             return 0
+
+        # PostgREST no permite que una misma sentencia UPSERT afecte dos veces
+        # la misma fila (error 21000). DeepSeek puede devolver más de un
+        # análisis para un lead, así que conservamos el último del lote.
+        cantidad_antes_deduplicar = len(registros)
+        registros_por_lead = {registro["lead_id"]: registro for registro in registros}
+        registros = list(registros_por_lead.values())
+        duplicados_descartados = cantidad_antes_deduplicar - len(registros)
+        if duplicados_descartados:
+            print(
+                f"[Supabase] Se eliminaron {duplicados_descartados} resultados duplicados "
+                "por lead_id; se conservó el último análisis de cada lead."
+            )
 
         print(f"[Supabase] Sincronizando {len(registros)} leads enriquecidos con DeepSeek...")
         cliente.table(TABLA_LEAD_ENRIQUECIDO).upsert(

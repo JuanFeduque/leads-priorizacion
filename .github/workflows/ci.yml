@@ -1,13 +1,17 @@
-name: CI
+name: CI y ETL programado
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # 06:00 America/Bogota = 11:00 UTC.
+    - cron: '0 11 * * *'
+  workflow_dispatch:
 
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,5 +27,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Run unit tests
+        run: pytest -q
+
+  etl:
+    needs: quality
+    # Evita llamadas a servicios externos desde pull requests.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Verify source data
+        run: |
+          test -f data/raw/leads.csv
+          test -f data/raw/conversaciones.json
+          test -f data/raw/catalogo_motos.csv
+          test -f data/raw/asesores.csv
+          test -f data/raw/historico_cierres.csv
+      - name: Run Complete Pipeline
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python -m pipeline.probar_pipeline

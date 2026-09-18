@@ -194,26 +194,16 @@ CREATE INDEX idx_lead_score_score     ON lead_score(score DESC);
 /*
  * ESTRATEGIA DE AISLAMIENTO POR EMPRESA
  * ──────────────────────────────────────
- * Cada sesión de PostgreSQL declara a qué empresa pertenece el
- * usuario conectado mediante:
- *
- *     SET LOCAL "app.empresa_actual" = 'EMP-01';
- *
- * Las policies comparan esa variable con la columna empresa_id
- * de cada fila.  Para lead_enriquecido y lead_score (que no
- * tienen empresa_id propia) la policy hace un sub-select contra
- * la tabla lead — un "join implícito" transparente.
+ * El JWT de cada usuario autenticado debe incluir
+ * ``app_metadata.empresa_id``. Las policies comparan ese claim con
+ * empresa_id. Para lead_enriquecido y lead_score (que no tienen
+ * empresa_id propia) la policy hace un sub-select contra lead.
  *
  * ¿CÓMO LO USA EL DASHBOARD DE STREAMLIT?
  * ─────────────────────────────────────────
- * El dashboard se conecta a Supabase con la clave `anon`
- * (supabase.create_client(url, anon_key)), que SÍ pasa por RLS.
- * Inmediatamente después de abrir la conexión, ejecuta:
- *
- *     SET LOCAL "app.empresa_actual" = '<empresa_id del usuario>';
- *
- * De esta forma cada empresa solo ve sus propios leads, scores
- * y enriquecimientos.
+ * El dashboard se conecta con el JWT de sesión del usuario, además de
+ * la anon key. De esta forma cada empresa solo ve sus propios leads,
+ * scores y enriquecimientos.
  *
  * ⚠ NUNCA usar la clave `service_role` desde el dashboard:
  *   esa clave bypasea RLS por completo y expondría datos de
@@ -227,10 +217,10 @@ ALTER TABLE lead ENABLE ROW LEVEL SECURITY;
 CREATE POLICY lead_isolation ON lead
     FOR ALL
     USING (
-        empresa_id = current_setting('app.empresa_actual', true)
+        empresa_id = auth.jwt() -> 'app_metadata' ->> 'empresa_id'
     )
     WITH CHECK (
-        empresa_id = current_setting('app.empresa_actual', true)
+        empresa_id = auth.jwt() -> 'app_metadata' ->> 'empresa_id'
     );
 
 -- ── lead_enriquecido (join implícito a lead) ─────────────────
@@ -242,14 +232,14 @@ CREATE POLICY lead_enriquecido_isolation ON lead_enriquecido
         lead_id IN (
             SELECT l.lead_id
               FROM lead l
-             WHERE l.empresa_id = current_setting('app.empresa_actual', true)
+             WHERE l.empresa_id = auth.jwt() -> 'app_metadata' ->> 'empresa_id'
         )
     )
     WITH CHECK (
         lead_id IN (
             SELECT l.lead_id
               FROM lead l
-             WHERE l.empresa_id = current_setting('app.empresa_actual', true)
+             WHERE l.empresa_id = auth.jwt() -> 'app_metadata' ->> 'empresa_id'
         )
     );
 
@@ -262,14 +252,14 @@ CREATE POLICY lead_score_isolation ON lead_score
         lead_id IN (
             SELECT l.lead_id
               FROM lead l
-             WHERE l.empresa_id = current_setting('app.empresa_actual', true)
+             WHERE l.empresa_id = auth.jwt() -> 'app_metadata' ->> 'empresa_id'
         )
     )
     WITH CHECK (
         lead_id IN (
             SELECT l.lead_id
               FROM lead l
-             WHERE l.empresa_id = current_setting('app.empresa_actual', true)
+             WHERE l.empresa_id = auth.jwt() -> 'app_metadata' ->> 'empresa_id'
         )
     );
 
