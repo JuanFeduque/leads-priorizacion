@@ -24,6 +24,34 @@ def _maestros(leads, catalogo, asesores):
     motos = catalogo.assign(puntos_venta_disponibles=lambda d: d["puntos_venta_disponibles"].fillna("").str.split("|"))
     return empresas, puntos, asesores_limpios.to_dict("records"), motos.to_dict("records")
 
+
+def _conversaciones_pendientes(conversaciones: list, cliente) -> list:
+    """Devuelve solo chats cuyo lead consolidado aún no tiene enriquecimiento.
+
+    Las conversaciones llegan con IDs crudos; la base conserva el UUID y el
+    arreglo ``lead_id_original``. Se resuelven ambos para no pagar IA dos veces
+    por un mismo lead consolidado.
+    """
+    leads_db = cliente.table("lead").select("lead_id,lead_id_original").limit(5000).execute().data or []
+    uuid_por_original = {
+        str(identificador): lead["lead_id"]
+        for lead in leads_db
+        for identificador in (lead.get("lead_id_original") or [])
+    }
+    enriquecidos = cliente.table("lead_enriquecido").select("lead_id").limit(5000).execute().data or []
+    ya_procesados = {fila["lead_id"] for fila in enriquecidos if fila.get("lead_id")}
+    pendientes, omitidas = [], 0
+    vistos: set[str] = set()
+    for conversacion in conversaciones:
+        uuid = uuid_por_original.get(str(conversacion.get("lead_id", "")))
+        if not uuid or uuid in ya_procesados or uuid in vistos:
+            omitidas += 1
+            continue
+        pendientes.append(conversacion)
+        vistos.add(uuid)
+    print(f"[IA] Pendientes: {len(pendientes)}; omitidas ya enriquecidas/sin lead: {omitidas}.")
+    return pendientes
+
 def test():
     # 1. Probar Ingesta
     leads_raw, conversaciones, catalogo, asesores, historico = cargar_datos_crudos()
@@ -47,9 +75,12 @@ def test():
     resultado = cargar_leads_supabase(leads_consolidados, tamano_lote=250)
     print(f"🚀 ¡Carga de leads a la nube completada! Lotes enviados: {resultado.lotes_enviados}")
 
-    # 5. Procesamiento masivo con Inteligencia Artificial (DeepSeek) del 100% de los chats
-    print(f"\n🧠 Iniciando análisis masivo con DeepSeek para las {len(conversaciones)} conversaciones...")
-    resultados_ia = procesar_todas_las_conversaciones(conversaciones, tamano_lote=20)
+    # 5. Procesamiento incremental: solo conversaciones sin enriquecimiento.
+    from pipeline.carga_supabase import crear_cliente_desde_entorno
+    cliente = crear_cliente_desde_entorno()
+    conversaciones_pendientes = _conversaciones_pendientes(conversaciones, cliente)
+    print(f"\n🧠 Iniciando análisis DeepSeek para {len(conversaciones_pendientes)} conversaciones pendientes...")
+    resultados_ia = procesar_todas_las_conversaciones(conversaciones_pendientes, tamano_lote=20)
 
     # 6. Guardar el enriquecimiento y score explicable.
     if resultados_ia:
@@ -57,15 +88,13 @@ def test():
         guardar_leads_enriquecidos_en_supabase(resultados_ia)
         # La función de IA emite IDs crudos; para el score se recuperan los UUIDs
         # persistidos por el mismo mecanismo que usa el cargador enriquecido.
-        from pipeline.carga_supabase import crear_cliente_desde_entorno
-        cliente = crear_cliente_desde_entorno()
         enriquecidos = pd.DataFrame(cliente.table("lead_enriquecido").select("*").limit(2000).execute().data or [])
         leads_db = pd.DataFrame(cliente.table("lead").select("lead_id,fecha_registro,fecha_primer_contacto").limit(2000).execute().data or [])
         scores = calcular_scores(leads_db, enriquecidos)
         cargar_registros_supabase("lead_score", scores.to_dict("records"), conflicto="lead_id")
         print("\n🎉 ¡Flujo de extremo a extremo completado con éxito!")
     else:
-        print("\n⚠️ No se obtuvieron resultados de la IA para guardar.")
+        print("\nℹ️ No hay conversaciones nuevas que enriquecer.")
 
 if __name__ == "__main__":
     test()

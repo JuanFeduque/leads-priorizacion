@@ -48,6 +48,14 @@ Cada chat está claramente separado e identificado con un ID DE LEAD.
 Tu tarea es analizar CADA chat de forma independiente y extraer la información requerida.
 Debes responder estrictamente en formato JSON válido que cumpla con la estructura solicitada, devolviendo una lista bajo la clave "resultados".
 Conserva exactamente el mismo orden de los chats recibidos e incluye el lead_id de cada uno.
+
+Para CADA resultado incluye obligatoriamente ``resumen_conversacion``: una sola
+frase de máximo 240 caracteres, en español, que indique el modelo consultado,
+la intención del cliente y el siguiente paso comercial. No inventes información.
+Si el cliente no respondió o no expresó intención, dilo explícitamente.
+
+Estructura mínima por resultado:
+{"lead_id":"LD-00001","intencion_compra":"Alta|Media|Baja", "forma_pago_declarada":"Contado|Crédito|No informa", "monto_cuota_inicial":null, "pidio_cita":false, "objeciones":[], "marcas_competencia":[], "urgencia":"Inmediata|Esta semana|Explorando", "resumen_conversacion":"..."}
 """
 
 

@@ -39,7 +39,7 @@ def _secreto(nombre: str) -> str | None:
 
 
 @st.cache_data(ttl=300, show_spinner="Cargando leads desde Supabase...")
-def cargar_datos(url: str, api_key: str, empresa_id: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def cargar_datos(url: str, api_key: str, empresa_id: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Lee ambas tablas explícitamente, sin depender del embedding de PostgREST."""
     cliente = create_client(url, api_key)
     consulta_leads = (
@@ -55,7 +55,7 @@ def cargar_datos(url: str, api_key: str, empresa_id: str | None) -> tuple[list[d
     leads = consulta_leads.execute()
     ids_lead = [fila["lead_id"] for fila in (leads.data or [])]
     if not ids_lead:
-        return [], []
+        return [], [], []
     enriquecidos = (
         cliente.table("lead_enriquecido")
         .select(
@@ -66,7 +66,14 @@ def cargar_datos(url: str, api_key: str, empresa_id: str | None) -> tuple[list[d
         .limit(2000)
         .execute()
     )
-    return leads.data or [], enriquecidos.data or []
+    scores = (
+        cliente.table("lead_score")
+        .select("lead_id,score,prioridad,justificacion,calculado_at")
+        .in_("lead_id", ids_lead)
+        .limit(2000)
+        .execute()
+    )
+    return leads.data or [], enriquecidos.data or [], scores.data or []
 
 
 def _texto_lista(valor: Any) -> str:
@@ -87,6 +94,19 @@ def _texto_o_defecto(valor: Any, defecto: str) -> str:
         return defecto
     texto = str(valor).strip()
     return texto if texto else defecto
+
+
+def _intencion_canonica(valor: Any) -> str:
+    """Unifica variaciones del LLM para métricas, tabla y scoring."""
+    texto = _texto_o_defecto(valor, "Sin analizar")
+    equivalencias = {
+        "alta": "Alta",
+        "media": "Media",
+        "baja": "Baja",
+        "solo cotización": "Baja",
+        "solo cotizacion": "Baja",
+    }
+    return equivalencias.get(texto.casefold(), texto)
 
 
 def _a_booleano(valor: Any) -> bool:
@@ -131,7 +151,9 @@ def _puntuar_lead(fila: pd.Series) -> tuple[int, str]:
     return score, temperatura
 
 
-def preparar_tabla(filas: list[dict[str, Any]], enriquecidos: list[dict[str, Any]]) -> pd.DataFrame:
+def preparar_tabla(
+    filas: list[dict[str, Any]], enriquecidos: list[dict[str, Any]], scores: list[dict[str, Any]] | None = None
+) -> pd.DataFrame:
     """Cruza ``lead.lead_id`` con ``lead_enriquecido.lead_id`` por UUID."""
     leads_df = pd.DataFrame(filas)
     if leads_df.empty:
@@ -152,6 +174,8 @@ def preparar_tabla(filas: list[dict[str, Any]], enriquecidos: list[dict[str, Any
         right_on="lead_id",
         validate="one_to_one",
     )
+    score_df = pd.DataFrame(scores or [], columns=["lead_id", "score", "prioridad", "justificacion", "calculado_at"])
+    combinados = combinados.merge(score_df, how="left", on="lead_id", validate="one_to_one")
 
     resultado: list[dict[str, Any]] = []
     for _, lead in combinados.iterrows():
@@ -163,7 +187,7 @@ def preparar_tabla(filas: list[dict[str, Any]], enriquecidos: list[dict[str, Any
                 "Nombre": lead.get("nombre_cliente") or "Sin nombre",
                 "Teléfono": lead.get("telefono_normalizado") or lead.get("telefono_original") or "—",
                 "Modelo de interés": lead.get("modelo_interes_texto") or "—",
-                "Intención": _texto_o_defecto(lead.get("intencion_compra"), "Sin analizar"),
+                "Intención": _intencion_canonica(lead.get("intencion_compra")),
                 "Pidió cita": _a_booleano(lead.get("pidio_cita")),
                 "Forma de pago": lead.get("forma_pago_declarada"),
                 "Monto cuota inicial": lead.get("monto_cuota_inicial"),
@@ -172,6 +196,9 @@ def preparar_tabla(filas: list[dict[str, Any]], enriquecidos: list[dict[str, Any
                 "Fecha de registro": lead.get("fecha_registro"),
                 "Primer contacto": lead.get("fecha_primer_contacto"),
                 "Canal": lead.get("canal") or "—",
+                "Score persistido": lead.get("score"),
+                "Prioridad persistida": lead.get("prioridad"),
+                "Justificación": lead.get("justificacion"),
             }
         )
     tabla = pd.DataFrame(resultado)
@@ -179,6 +206,14 @@ def preparar_tabla(filas: list[dict[str, Any]], enriquecidos: list[dict[str, Any
         tabla[["Score", "Temperatura"]] = tabla.apply(
             lambda fila: pd.Series(_puntuar_lead(fila)), axis=1
         )
+        # El ETL es la fuente de verdad. El cálculo local es solo respaldo para
+        # filas nuevas que aún no tienen lead_score.
+        tiene_score = tabla["Score persistido"].notna()
+        tabla.loc[tiene_score, "Score"] = tabla.loc[tiene_score, "Score persistido"].astype(int)
+        mapa_temperatura = {"Alta": "🔥 Caliente", "Media": "⚡ Tibio", "Baja": "❄️ Frío"}
+        tabla.loc[tiene_score, "Temperatura"] = tabla.loc[tiene_score, "Prioridad persistida"].map(mapa_temperatura)
+        tabla["Justificación"] = tabla["Justificación"].fillna("Score calculado localmente; pendiente de persistir.")
+        tabla = tabla.drop(columns=["Score persistido", "Prioridad persistida"])
     return tabla
 
 
@@ -198,8 +233,8 @@ def main() -> None:
         st.stop()
 
     try:
-        leads, enriquecidos = cargar_datos(url, api_key, empresa_fija)
-        datos = preparar_tabla(leads, enriquecidos)
+        leads, enriquecidos, scores = cargar_datos(url, api_key, empresa_fija)
+        datos = preparar_tabla(leads, enriquecidos, scores)
     except Exception as exc:
         st.error("No fue posible cargar los leads desde Supabase.")
         st.exception(exc)
@@ -234,8 +269,15 @@ def main() -> None:
     metrica_3.metric("Citas agendadas", citas)
 
     filtrados = filtrados.sort_values(["Score", "Fecha de registro"], ascending=[False, False])
+    # La tabla principal debe servir para decidir a quién contactar primero.
+    # Los datos narrativos de IA quedan disponibles en el detalle, sin forzar
+    # desplazamiento horizontal ni llenar la vista con "Sin conversación".
     vista = filtrados.drop(
-        columns=["lead_id", "Forma de pago", "Monto cuota inicial", "Primer contacto"], errors="ignore"
+        columns=[
+            "lead_id", "Forma de pago", "Monto cuota inicial", "Primer contacto",
+            "Resumen IA", "Justificación",
+        ],
+        errors="ignore",
     )
 
     st.subheader("Leads priorizados")
@@ -247,10 +289,34 @@ def main() -> None:
         column_config={
             "Pidió cita": st.column_config.CheckboxColumn("Pidió cita"),
             "Score": st.column_config.NumberColumn("Score", format="%d / 100"),
-            "Resumen IA": st.column_config.TextColumn("Resumen IA", width="large"),
             "Objeciones": st.column_config.TextColumn("Objeciones", width="medium"),
         },
     )
+
+    con_conversacion = filtrados[
+        filtrados["Resumen IA"].ne("Sin conversación analizada")
+    ].copy()
+    with st.expander("Detalle IA del lead"):
+        if con_conversacion.empty:
+            st.info("No hay conversaciones analizadas para los leads seleccionados.")
+        else:
+            opciones = con_conversacion.index.tolist()
+            indice = st.selectbox(
+                "Lead",
+                opciones,
+                format_func=lambda i: (
+                    f"{_texto_o_defecto(con_conversacion.at[i, 'Nombre'], 'Sin nombre')} · "
+                    f"{_texto_o_defecto(con_conversacion.at[i, 'Modelo de interés'], 'Sin modelo')} · "
+                    f"{con_conversacion.at[i, 'Score']} pts"
+                ),
+            )
+            lead_detalle = con_conversacion.loc[indice]
+            st.write(lead_detalle["Resumen IA"])
+            detalle_izq, detalle_der = st.columns(2)
+            detalle_izq.write(f"**Forma de pago:** {_texto_o_defecto(lead_detalle['Forma de pago'], 'No informa')}")
+            detalle_izq.write(f"**Cuota inicial:** {_texto_o_defecto(lead_detalle['Monto cuota inicial'], 'No informa')}")
+            detalle_der.write(f"**Objeciones:** {_texto_lista(lead_detalle['Objeciones'])}")
+            detalle_der.write(f"**Justificación del score:** {_texto_o_defecto(lead_detalle['Justificación'], 'No disponible')}")
 
     with st.expander("Ejecución local"):
         st.code("streamlit run dashboard/app.py", language="bash")
