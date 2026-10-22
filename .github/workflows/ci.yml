@@ -2,7 +2,7 @@ name: CI y ETL programado
 
 on:
   push:
-    #branches: [mainx]
+    #branches: [main]
   schedule:
     # 06:00 America/Bogota = 11:00 UTC.
     - cron: '0 11 * * *'
